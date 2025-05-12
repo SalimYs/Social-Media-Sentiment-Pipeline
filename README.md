@@ -7,6 +7,8 @@ This repository contains a production-ready Docker Compose setup for a scalable,
 ## Table of Contents
 
 * [Architecture](#architecture)
+* [Hardware Requirements](#hardware-requirements)
+* [Project Structure](#project-structure)
 * [Features](#features)
 * [Prerequisites](#prerequisites)
 * [Getting Started](#getting-started)
@@ -16,13 +18,11 @@ This repository contains a production-ready Docker Compose setup for a scalable,
 * [Monitoring & Logging](#monitoring--logging)
 * [License](#license)
 
----
-
 ## Architecture
 
 ```text
              +---------------------+       +------------------+
-             |   Zookeeper (2181)  | <---> |    Kafka Broker   |
+             |   Zookeeper (2181)  | <---> |   Kafka Broker   |
              +---------------------+       +------------------+
                        ^                         ^
                        |                         |
@@ -42,8 +42,8 @@ This repository contains a production-ready Docker Compose setup for a scalable,
                 +----------------------+   +--------------------+
 
   +---------------------------------------------------------------+
-  |                       FastAPI ML API                         |
-  |             (Expose sentiment predictions)                   |
+  |                     FastAPI ML API                           |
+  |              (Expose sentiment predictions)                  |
   +---------------------------------------------------------------+
                          ^                       ^
                          |                       |
@@ -53,11 +53,48 @@ This repository contains a production-ready Docker Compose setup for a scalable,
                                                ^
                                                |
                                         +------+-------+
-                                        | Prometheus    |
+                                        |  Prometheus   |
                                         +--------------+
-                                        | Nginx Proxy   |
+                                        |  Nginx Proxy  |
                                         +--------------+
+```
 
+## Hardware Requirements
+
+* **CPU**: Minimum 4 cores (e.g., Intel i7 / AMD Ryzen 5); 8+ cores recommended for production.
+* **Memory**: At least 16 GB RAM; 32 GB+ recommended for concurrent Spark streaming & batch jobs.
+* **Storage**: SSD with at least 100 GB free for logs, checkpoints, and Delta Lake storage.
+* **Network**: 1 Gbps Ethernet (low-latency network for distributed components).
+* **GPU**: Optional; only required if ML model inference/training uses GPU acceleration.
+
+## Project Structure
+
+```text
+social-media-sentiment-pipeline/
+├── docker-compose.yml
+├── .env.example
+├── .env                       # Copy from .env.example and inject secrets at runtime
+├── kafka/
+│   └── Dockerfile
+├── spark/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── spark-streaming-job.py
+│   └── batch-processing-job.py
+├── producer/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── social_media_producer.py
+├── ml_model/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── train_model.py
+│   ├── app.py
+│   └── model.pkl
+└── dashboard/
+    ├── Dockerfile
+    ├── requirements.txt
+    └── app.py
 ```
 
 ## Features
@@ -72,9 +109,9 @@ This repository contains a production-ready Docker Compose setup for a scalable,
 
 ## Prerequisites
 
-* Docker Engine >= 20.10
-* Docker Compose CLI >= 1.29
-* A certificate authority or self-signed certificates for TLS (zookeeper, Kafka, Spark, MinIO, Nginx).
+* Docker Engine >= 20.10
+* Docker Compose CLI >= 1.29
+* TLS certificates for Zookeeper, Kafka, Spark, MinIO, and Nginx (self-signed or CA-signed).
 * A secrets management solution (e.g., HashiCorp Vault, AWS Secrets Manager) to inject real credentials at runtime.
 
 ## Getting Started
@@ -82,29 +119,25 @@ This repository contains a production-ready Docker Compose setup for a scalable,
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/SalimYs/Social-Media-Sentiment-Pipeline.git
+   git clone https://github.com/SalimYs/social-media-sentiment-pipeline.git
    cd social-media-sentiment-pipeline
    ```
-
-2. **Copy the example `.env` and configure secrets**
+2. **Configure environment**
 
    ```bash
    cp .env.example .env
-   # Update placeholders or configure your CI/CD to inject real values
+   # Populate placeholders or configure CI/CD to inject real values
    ```
-
-3. **Ensure your certificates and secrets are mounted**
+3. **Mount certificates & secrets**
 
    * Place JKS keystores/truststores under `./secrets/kafka/` and `./secrets/zookeeper/`.
    * Place TLS cert/key pairs under `./certs/minio/` and `./certs/nginx/`.
-
 4. **Start the stack**
 
    ```bash
    docker-compose up -d
    ```
-
-5. **Access the services**
+5. **Access services**
 
    * **API**: `https://<proxy-domain>/api`
    * **Grafana**: `https://<proxy-domain>/grafana`
@@ -113,9 +146,9 @@ This repository contains a production-ready Docker Compose setup for a scalable,
 
 ## Environment Variables
 
-All service configuration is driven by the `.env` file.
+All configuration is driven by the `.env` file.
 **Never commit real secrets**; commit only placeholders and add `.env` to `.gitignore`.
-See [`.env.example`](./.env.example) for a full list of supported variables.
+See [`.env.example`](./.env.example) for full variable list.
 
 ## Docker Compose Services
 
@@ -135,7 +168,7 @@ See [`.env.example`](./.env.example) for a full list of supported variables.
 * **TLS Everywhere**: All inter-service and external communication is encrypted.
 * **No Plaintext Ports**: Only the Nginx proxy exposes external ports.
 * **Secrets Management**: Credentials are injected at runtime; no hard-coded secrets.
-* **Rotate Certificates & Keys**: Establish a rotation policy for keystores, truststores, and application secrets.
+* **Rotate Certificates & Keys**: Implement a rotation policy for keystores, truststores, and application secrets.
 
 ## Monitoring & Logging
 
