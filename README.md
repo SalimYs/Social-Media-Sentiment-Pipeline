@@ -148,7 +148,7 @@ social-media-sentiment-pipeline/
 
 All configuration is driven by the `.env` file.
 **Never commit real secrets**; commit only placeholders and add `.env` to `.gitignore`.
-See [`.env.example`](./.env.example) for full variable list.
+See [`.env.example`](./.env) for full variable list.
 
 ## Docker Compose Services
 
