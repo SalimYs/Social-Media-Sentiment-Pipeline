@@ -1,0 +1,309 @@
+\-- kafka/Dockerfile --
+FROM bitnami/kafka\:latest
+
+# No additional configuration needed; all settings come from docker-compose.yml
+
+\-- producer/Dockerfile --
+FROM python:3.9-slim
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+CMD \["python", "social\_media\_producer.py"]
+
+\-- producer/requirements.txt --
+tweepy==4.10.1
+kafka-python==2.0.2
+python-dotenv==0.21.0
+
+\-- producer/social\_media\_producer.py --
+import os
+import json
+import time
+import logging
+from kafka import KafkaProducer
+import tweepy
+from dotenv import load\_dotenv
+
+logging.basicConfig(
+level=logging.INFO,
+format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(**name**)
+
+load\_dotenv()
+
+bearer\_token = os.getenv('SOCIAL\_MEDIA\_BEARER\_TOKEN')
+if not bearer\_token:
+logger.error("SOCIAL\_MEDIA\_BEARER\_TOKEN not set")
+raise ValueError("SOCIAL\_MEDIA\_BEARER\_TOKEN environment variable not set")
+
+bootstrap\_servers = os.getenv('KAFKA\_BOOTSTRAP\_SERVERS', 'kafka:9093')
+topic\_name = os.getenv('KAFKA\_TOPIC', 'social\_media\_posts')
+
+class SocialMediaProducer:
+def **init**(self):
+self.producer = KafkaProducer(
+bootstrap\_servers=bootstrap\_servers,
+value\_serializer=lambda v: json.dumps(v).encode('utf-8'),
+security\_protocol=os.getenv('KAFKA\_SECURITY\_PROTOCOL', 'SASL\_SSL'),
+sasl\_mechanism=os.getenv('KAFKA\_SASL\_MECHANISM', 'PLAIN'),
+sasl\_plain\_username=os.getenv('KAFKA\_CLIENT\_USER'),
+sasl\_plain\_password=os.getenv('KAFKA\_CLIENT\_PASSWORD')
+)
+self.client = tweepy.Client(bearer\_token=bearer\_token)
+self.keywords = \["AI", "machine learning", "data science", "technology", "python"]
+logger.info("Social Media Producer initialized")
+
+```
+def fetch_and_send_tweets(self):
+    try:
+        for keyword in self.keywords:
+            tweets = self.client.search_recent_tweets(
+                query=keyword,
+                max_results=10,
+                tweet_fields=["created_at", "lang", "text"]
+            )
+            if not tweets.data:
+                logger.warning(f"No tweets for {keyword}")
+                continue
+            for t in tweets.data:
+                if t.lang == 'en':
+                    data = {
+                        'id': str(t.id),
+                        'text': t.text,
+                        'created_at': t.created_at.isoformat(),
+                        'keyword': keyword
+                    }
+                    self.producer.send(topic_name, data)
+                    logger.info(f"Sent tweet {t.id}")
+            time.sleep(5)
+    except Exception as e:
+        logger.error(f"Fetch error: {e}")
+
+def run(self):
+    logger.info(f"Producing to {topic_name}")
+    try:
+        while True:
+            self.fetch_and_send_tweets()
+            time.sleep(60)
+    except KeyboardInterrupt:
+        logger.info("Interrupted")
+    finally:
+        self.producer.close()
+```
+
+if **name** == '**main**':
+time.sleep(30)
+SocialMediaProducer().run()
+
+\-- spark/Dockerfile --
+FROM bitnami/spark\:latest
+USER root
+RUN apt-get update && apt-get install -y python3-pip
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+COPY . .
+USER 1001
+
+\-- spark/requirements.txt --
+pyspark==3.3.0
+kafka-python==2.0.2
+requests==2.28.1
+numpy==1.23.2
+pandas==1.4.3
+scikit-learn==1.1.2
+joblib==1.1.0
+python-dotenv==0.21.0
+
+\-- spark/spark-streaming-job.py --
+import os
+import time
+import logging
+import requests
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import from\_json, col, udf
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+from dotenv import load\_dotenv
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(**name**)
+load\_dotenv()
+
+bootstrap = os.getenv('KAFKA\_BOOTSTRAP\_SERVERS', 'kafka:9093')
+topic = os.getenv('KAFKA\_TOPIC', 'social\_media\_posts')
+spark\_master = os.getenv('SPARK\_MASTER', 'spark://spark-master:7077')
+API = '[http://ml-api:5000/predict](http://ml-api:5000/predict)'
+
+schema = StructType(\[
+StructField('id', StringType()),
+StructField('text', StringType()),
+StructField('created\_at', TimestampType()),
+StructField('keyword', StringType())
+])
+
+@udf(StringType())
+def sentiment\_udf(text):
+try:
+r = requests.post(API, json={'text': text})
+if r.ok:
+return r.json().get('sentiment','neutral')
+except:
+pass
+return 'neutral'
+
+spark = SparkSession.builder.appName('Streaming').master(spark\_master).getOrCreate()
+spark.sparkContext.setLogLevel('WARN')
+
+df = spark.readStream.format('kafka')&#x20;
+.option('kafka.bootstrap.servers', bootstrap)&#x20;
+.option('subscribe', topic)&#x20;
+.load()
+
+parsed = df.selectExpr('CAST(value AS STRING)')&#x20;
+.select(from\_json(col('value'), schema).alias('d')).select('d.\*')
+
+out = parsed.withColumn('sentiment', sentiment\_udf(col('text')))
+
+out.writeStream.format('memory').queryName('sentiments').outputMode('append').start()
+out.writeStream.format('console').outputMode('append').start().awaitTermination()
+
+\-- spark/batch-processing-job.py --
+import os
+import logging
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import count, when, col
+from dotenv import load\_dotenv
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+load\_dotenv()
+
+spark = SparkSession.builder.appName('Batch').master(os.getenv('SPARK\_MASTER')).getOrCreate()
+
+df = spark.sql('SELECT \* FROM sentiments')
+summary = df.groupBy('keyword').agg(
+count('\*').alias('total'),
+count(when(col('sentiment')=='positive',True)).alias('pos'),
+count(when(col('sentiment')=='negative',True)).alias('neg'),
+count(when(col('sentiment')=='neutral',True)).alias('neu')
+).withColumn('pos\_pct',col('pos')\*100/col('total'))
+
+summary.show()
+summary.write.mode('overwrite').saveAsTable('sentiment\_summary')
+
+\-- ml\_model/Dockerfile --
+FROM python:3.9-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD \["python", "app.py"]
+
+\-- ml\_model/requirements.txt --
+flask==2.2.2
+scikit-learn==1.1.2
+numpy==1.23.2
+pandas==1.4.3
+joblib==1.1.0
+nltk==3.7
+python-dotenv==0.21.0
+
+\-- ml\_model/train\_model.py --
+import os
+import logging
+import nltk
+import joblib
+import pandas as pd
+from nltk.corpus import stopwords
+from nltk.tokenize import word\_tokenize
+from sklearn.feature\_extraction.text import TfidfVectorizer
+from sklearn.linear\_model import LogisticRegression
+from sklearn.model\_selection import train\_test\_split
+from sklearn.metrics import classification\_report
+
+logging.basicConfig(level=logging.INFO)
+logger=logging.getLogger(**name**)
+
+nltk.download('punkt')
+nltk.download('stopwords')
+
+def preprocess(text):
+tokens = \[w for w in word\_tokenize(text.lower()) if w\.isalpha() and w not in stopwords.words('english')]
+return ' '.join(tokens)
+
+data = pd.DataFrame({'text':\[], 'sentiment':\[]})
+
+# load your dataset here
+
+X = TfidfVectorizer(max\_features=1000).fit\_transform(data\['text'].apply(preprocess))
+y = data\['sentiment']
+X\_train,X\_test,y\_train,y\_test = train\_test\_split(X,y,test\_size=0.2,random\_state=42)
+model = LogisticRegression(max\_iter=1000).fit(X\_train,y\_train)
+pred = model.predict(X\_test)
+logger.info(classification\_report(y\_test,pred))
+joblib.dump(model,'model.pkl')
+joblib.dump(TfidfVectorizer(max\_features=1000),'vectorizer.pkl')
+
+\-- ml\_model/app.py --
+import os
+import logging
+import joblib
+from flask import Flask, request, jsonify
+from dotenv import load\_dotenv
+
+logging.basicConfig(level=logging.INFO)
+load\_dotenv()
+app=Flask(**name**)
+model=joblib.load('model.pkl')
+vec=joblib.load('vectorizer.pkl')
+
+@app.route('/predict',methods=\['POST'])
+def predict():
+text=request.json.get('text','')
+proc=' '.join(\[w for w in text.lower().split() if w\.isalpha()])
+vect=vec.transform(\[proc])
+res=model.predict(vect)\[0]
+return jsonify({'sentiment'\:res})
+
+@app.route('/health')
+def health():
+return jsonify({'status':'ok'})
+
+if **name**=='**main**':
+app.run(host='0.0.0.0',port=5000)
+
+\-- dashboard/Dockerfile --
+FROM python:3.9-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD \["python", "app.py"]
+
+\-- dashboard/requirements.txt --
+dash==2.6.2
+dash-bootstrap-components==1.2.1
+plotly==5.10.0
+pandas==1.4.3
+pyspark==3.3.0
+python-dotenv==0.21.0
+
+\-- dashboard/app.py --
+import os
+import time
+import logging
+from pyspark.sql import SparkSession
+import dash
+from dash import dcc, html
+from dash.dependencies import Input,Output
+import dash\_bootstrap\_components as dbc
+import plotly.express as px
+
+logging.basicConfig(level=logging.INFO)
+app=dash.Dash(**name**,external\_stylesheets=\[dbc.themes.BOOTSTRAP])
+spark=SparkSession.builder.master(os.getenv('SPARK\_MASTER')).appName('dash').getOrCreate()
+server=app.server
+... (rest of dashboard.py)
