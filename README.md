@@ -30,11 +30,11 @@ This repository contains a production-ready Docker Compose setup for a scalable,
          | Producer: Social Media    |           |
          |  (Fetch & Publish Posts)  |           |
          +---------------------------+           |
-                                               |
-                +----------------------+        |
+                                                 |
+                +----------------------+         |
                 | Spark Streaming Job  | -------+
-                |  (Consume & Process) |        |
-                +----------------------+        |
+                |  (Consume & Process) |         |
+                +----------------------+         |
                          |                       |
                          v                       v
                 +----------------------+   +--------------------+
