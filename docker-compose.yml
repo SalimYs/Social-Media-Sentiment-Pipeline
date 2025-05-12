@@ -1,0 +1,316 @@
+version: '3.9'
+
+# Load environment file for all services
+env_file:
+  - .env
+
+# Reusable logging and healthchecks
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: 3
+
+x-healthcheck: &default-healthcheck
+  interval: 30s
+  timeout: 20s
+  retries: 3
+
+services:
+  # ZooKeeper with TLS & Auth
+  zookeeper:
+    image: bitnami/zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - ${ZOOKEEPER_PORT}:2181
+    environment:
+      ZOOKEEPER_TLS_ENABLED: ${ZOOKEEPER_TLS_ENABLED}
+      ZOOKEEPER_TLS_KEYSTORE_PATH: ${ZOOKEEPER_TLS_KEYSTORE_PATH}
+      ZOOKEEPER_TLS_TRUSTSTORE_PATH: ${ZOOKEEPER_TLS_TRUSTSTORE_PATH}
+      ZOOKEEPER_ALLOW_ANONYMOUS_LOGIN: ${ZOOKEEPER_ALLOW_ANONYMOUS_LOGIN}
+      ZOO_ENABLE_AUTH: ${ZOO_ENABLE_AUTH}
+      ZOO_SERVER_USERS: ${ZOO_SERVER_USERS}
+      ZOO_SERVER_PASSWORDS: ${ZOO_SERVER_PASSWORDS}
+    volumes:
+      - zookeeper_data:/bitnami
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test:
+        - CMD-SHELL
+        - echo ruok | nc localhost 2181 | grep imok
+
+  # Kafka with SASL_SSL
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: kafka
+    ports:
+      - ${KAFKA_INTERNAL_PORT}:9093
+      - ${KAFKA_EXTERNAL_PORT}:29093
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:SASL_SSL,EXTERNAL:SASL_SSL
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9093,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT}
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_SASL_ENABLED_MECHANISMS: ${KAFKA_SASL_ENABLED_MECHANISMS}
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: ${KAFKA_SASL_MECHANISM}
+      KAFKA_SECURITY_INTER_BROKER_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL}
+      KAFKA_SSL_KEYSTORE_LOCATION: /etc/kafka/secrets/keystore.jks
+      KAFKA_SSL_KEYSTORE_PASSWORD: ${KAFKA_SSL_KEYSTORE_PASSWORD}
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /etc/kafka/secrets/truststore.jks
+      KAFKA_SSL_TRUSTSTORE_PASSWORD: ${KAFKA_SSL_TRUSTSTORE_PASSWORD}
+      KAFKA_CLIENT_USER: ${KAFKA_CLIENT_USER}
+      KAFKA_CLIENT_PASSWORD: ${KAFKA_CLIENT_PASSWORD}
+    secrets:
+      - kafka_keystore
+      - kafka_truststore
+    depends_on:
+      - zookeeper
+    volumes:
+      - kafka_data:/bitnami
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test:
+        - CMD
+        - kafka-broker-api-versions.sh
+        - --bootstrap-server
+        - localhost:9093
+
+  # Social Media Producer
+  producer:
+    build: ./producer
+    container_name: social_media_producer
+    env_file:
+      - .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:${KAFKA_INTERNAL_PORT}
+      TOPIC_NAME: ${KAFKA_TOPIC}
+      BEARER_TOKEN: ${SOCIAL_MEDIA_BEARER_TOKEN}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM}
+      KAFKA_USERNAME: ${KAFKA_CLIENT_USER}
+      KAFKA_PASSWORD: ${KAFKA_CLIENT_PASSWORD}
+    depends_on:
+      - kafka
+    networks:
+      - sentiment_network
+    volumes:
+      - ./producer:/app
+    restart: unless-stopped
+    logging: *default-logging
+
+  # MinIO with HTTPS (no direct ports)
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    env_file:
+      - .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+      - ./certs/minio:/certs:ro
+    command: >
+      server /data
+      --address ":9000"
+      --console-address ":9001"
+      --certs-dir /certs
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      <<: *default-healthcheck
+      test:
+        - CMD
+        - curl
+        - -k
+        - -f
+        - https://localhost:9000/minio/health/live
+
+  # Spark Master
+  spark-master:
+    image: bitnami/spark:latest
+    container_name: spark-master
+    ports:
+      - ${SPARK_MASTER_UI_PORT}:8080
+      - ${SPARK_MASTER_PORT}:7077
+    env_file:
+      - .env
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: ${SPARK_AUTH_ENABLED}
+      SPARK_RPC_ENCRYPTION_ENABLED: ${SPARK_ENCRYPTION_ENABLED}
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: ${SPARK_STORAGE_ENCRYPTION_ENABLED}
+      SPARK_SSL_ENABLED: ${SPARK_SSL_ENABLED}
+      SPARK_SSL_KEYSTORE: ${SPARK_SSL_KEYSTORE}
+      SPARK_SSL_TRUSTSTORE: ${SPARK_SSL_TRUSTSTORE}
+    volumes:
+      - spark_data:/bitnami
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # Spark Worker
+  spark-worker:
+    image: bitnami/spark:latest
+    container_name: spark-worker
+    env_file:
+      - .env
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:${SPARK_MASTER_PORT}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES}
+      SPARK_RPC_AUTHENTICATION_ENABLED: ${SPARK_AUTH_ENABLED}
+      SPARK_RPC_ENCRYPTION_ENABLED: ${SPARK_ENCRYPTION_ENABLED}
+      SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED: ${SPARK_STORAGE_ENCRYPTION_ENABLED}
+      SPARK_SSL_ENABLED: ${SPARK_SSL_ENABLED}
+      SPARK_SSL_KEYSTORE: ${SPARK_SSL_KEYSTORE}
+      SPARK_SSL_TRUSTSTORE: ${SPARK_SSL_TRUSTSTORE}
+    depends_on:
+      - spark-master
+    volumes:
+      - spark_data:/bitnami
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # Spark Streaming Job
+  spark-streaming:
+    build: ./spark
+    container_name: spark-streaming
+    command: python /app/spark-streaming-job.py
+    env_file:
+      - .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:${KAFKA_INTERNAL_PORT}
+      TOPIC_NAME: ${KAFKA_TOPIC}
+      SPARK_MASTER: spark://spark-master:${SPARK_MASTER_PORT}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM}
+      KAFKA_CLIENT_USER: ${KAFKA_CLIENT_USER}
+      KAFKA_CLIENT_PASSWORD: ${KAFKA_CLIENT_PASSWORD}
+      MINIO_ENDPOINT: https://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      DELTA_LAKE_CHECKPOINT_PATH: ${DELTA_LAKE_CHECKPOINT_PATH}
+      DELTA_LAKE_TABLE_PATH: ${DELTA_LAKE_TABLE_PATH}
+    depends_on:
+      - kafka
+      - spark-master
+      - ml-api
+      - minio
+    volumes:
+      - ./spark:/app
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ML API (fronted by proxy, no direct HTTP port)
+  ml-api:
+    build: ./ml_model
+    container_name: ml-api
+    deploy:
+      replicas: ${ML_API_REPLICAS}
+      resources:
+        limits:
+          cpus: 1.0
+          memory: 2G
+    env_file:
+      - .env
+    environment:
+      API_KEY: ${ML_API_KEY}
+      MODEL_PATH: /app/models
+      LOG_LEVEL: ${LOG_LEVEL}
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # HTTPS Reverse Proxy for ML API, Grafana, Prometheus, MinIO
+  proxy:
+    image: nginx:latest
+    container_name: proxy
+    ports:
+      - "443:443"
+    volumes:
+      - ./certs/nginx:/etc/nginx/certs:ro
+      - ./nginx/proxy.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ml-api
+      - grafana
+      - prometheus
+      - minio
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # Grafana (no direct HTTP port)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    env_file:
+      - .env
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+  # Prometheus (no direct HTTP port)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    networks:
+      - sentiment_network
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  sentiment_network:
+    driver: bridge
+
+volumes:
+  zookeeper_data:
+  kafka_data:
+  spark_data:
+  minio_data:
+  model_data:
+  prometheus_data:
+  grafana_data:
+
+secrets:
+  kafka_keystore:
+    file: ./secrets/kafka/keystore.jks
+  kafka_truststore:
+    file: ./secrets/kafka/truststore.jks
